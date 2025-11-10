@@ -1,0 +1,348 @@
+/**
+ * App.tsx - Main Application Component
+ *
+ * EventBus-driven architecture with Zustand stores
+ * Migrated from agent-ui with simplified structure
+ */
+
+import { useEffect, useState, useRef } from "react";
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
+import Sidebar from "~/components/Sidebar";
+import HeaderNav, { type TabType } from "~/components/HeaderNav";
+import ChatInterface from "~/components/ChatInterface";
+import { connectWebSocket, disconnectWebSocket } from "~/api/agent";
+import { useSessionStore } from "~/stores/sessionStore";
+import { useMessageStore } from "~/stores/messageStore";
+
+// Import stores to ensure they're initialized and subscribed to EventBus
+import "~/stores/sessionStore";
+import "~/stores/messageStore";
+import "~/stores/uiStore";
+
+function AppContent() {
+  const navigate = useNavigate();
+  const { sessionId } = useParams();
+  const [searchParams] = useSearchParams();
+  const sessions = useSessionStore((state) => state.sessions);
+  const selectedSession = useSessionStore((state) => state.selectedSession);
+  const navigationTarget = useSessionStore((state) => state.navigationTarget);
+  const selectSession = useSessionStore((state) => state.selectSession);
+  const refreshSessions = useSessionStore((state) => state.refreshSessions);
+  const sendMessage = useMessageStore((state) => state.sendMessage);
+  const [activeTab, setActiveTab] = useState<TabType>("chat");
+  const [isMobile, setIsMobile] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Use ref to prevent double execution in React Strict Mode
+  const autoRunProcessedRef = useRef(false);
+  const startUrlCheckedRef = useRef(false);
+
+  // Handle /auto route with prompt and/or session parameters
+  useEffect(() => {
+    if (window.location.pathname !== "/auto") return;
+    if (autoRunProcessedRef.current) return;
+
+    const promptParam = searchParams.get("prompt");
+    const sessionParam = searchParams.get("session");
+
+    if (!promptParam && !sessionParam) {
+      // No parameters, go to home
+      navigate("/", { replace: true });
+      return;
+    }
+
+    autoRunProcessedRef.current = true;
+    console.log("[App] Auto-run:", { prompt: promptParam, session: sessionParam });
+
+    // Case 1: Only session - navigate to it
+    if (sessionParam && !promptParam) {
+      navigate(`/session/${sessionParam}`, { replace: true });
+      return;
+    }
+
+    // Case 2 & 3: Has prompt - send message (with or without session)
+    if (promptParam) {
+      // Navigate first to clear /auto URL
+      if (sessionParam) {
+        // Has session - select it and navigate
+        selectSession(sessionParam);
+        navigate(`/session/${sessionParam}`, { replace: true });
+        // Wait longer for session to load
+        setTimeout(() => {
+          sendMessage(sessionParam, promptParam, []);
+        }, 800);
+      } else {
+        // No session - create new one
+        navigate("/", { replace: true });
+        setTimeout(() => {
+          sendMessage(undefined, promptParam, []);
+        }, 200);
+      }
+    }
+  }, [searchParams, navigate, sendMessage, selectSession]);
+
+  // Detect mobile viewport (1200px breakpoint)
+  useEffect(() => {
+    const checkMobile = () => {
+      const width = window.innerWidth;
+      const shouldBeMobile = width < 1200;
+      console.log("[App] Viewport check:", { width, shouldBeMobile });
+      setIsMobile(shouldBeMobile);
+    };
+
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  // Check for auto-run start URL (backend manages one-time logic)
+  useEffect(() => {
+    // Only check on root path
+    if (window.location.pathname !== "/") return;
+    if (startUrlCheckedRef.current) return;
+
+    startUrlCheckedRef.current = true;
+
+    const checkStartUrl = async () => {
+      try {
+        const response = await fetch("/api/start-url");
+        const data = await response.json();
+
+        if (data.startUrl && data.startUrl !== "/") {
+          console.log("[App] 🚀 Auto-run detected, redirecting to:", data.startUrl);
+          navigate(data.startUrl, { replace: true });
+        }
+      } catch (error) {
+        console.error("[App] Failed to fetch start URL:", error);
+      }
+    };
+
+    checkStartUrl();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
+
+  // Initialize WebSocket and load sessions (only once on mount)
+  useEffect(() => {
+    console.log("[App] Initializing: connecting WebSocket and loading sessions");
+
+    connectWebSocket().catch((error) => {
+      console.error("[App] Failed to connect WebSocket:", error);
+    });
+
+    // Use Store action to load sessions
+    refreshSessions().catch((error) => {
+      console.error("[App] Failed to load sessions:", error);
+    });
+
+    // Listen for pending session navigation
+    const handlePendingNav = (event: Event) => {
+      const customEvent = event as CustomEvent<{ sessionId: string }>;
+      const { sessionId } = customEvent.detail;
+      console.log("[App] Navigating to pending session:", sessionId);
+      navigate(`/session/${sessionId}`, { replace: true });
+    };
+
+    window.addEventListener("navigate-to-pending", handlePendingNav);
+
+    return () => {
+      console.log("[App] Cleaning up: disconnecting WebSocket");
+      disconnectWebSocket();
+      window.removeEventListener("navigate-to-pending", handlePendingNav);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty deps - only run once on mount
+
+  // Handle URL-based session loading
+  // When URL changes, call Store action to select session OR clear it
+  useEffect(() => {
+    // Protection: Redirect pending URLs (from refresh/direct access)
+    if (sessionId?.startsWith("pending-")) {
+      console.warn(
+        "[App] Detected pending session URL on mount/refresh, redirecting to home:",
+        sessionId
+      );
+      navigate("/", { replace: true });
+      return;
+    }
+
+    if (sessionId && sessions.length > 0) {
+      // URL has sessionId - select it
+      if (!selectedSession || selectedSession.id !== sessionId) {
+        const session = sessions.find((s) => s.id === sessionId);
+        if (session) {
+          console.log("[App] URL changed, calling selectSession action:", sessionId);
+          selectSession(sessionId);
+        }
+      }
+    } else if (!sessionId && selectedSession) {
+      // URL is "/" and we have a selected session - clear it
+      console.log("[App] URL is root, clearing selectedSession");
+      useSessionStore.setState({ selectedSession: null });
+    }
+  }, [sessionId, sessions, selectedSession, selectSession, navigate]);
+
+  // Listen to Store navigation state changes
+  // When Store emits navigationTarget, perform navigation
+  useEffect(() => {
+    if (navigationTarget) {
+      console.log("[App] Navigation target changed, navigating to:", navigationTarget);
+
+      // Determine if this is a pending-to-real session replacement
+      const isPendingReplacement =
+        sessionId?.startsWith("pending-") && !navigationTarget.startsWith("pending-");
+
+      // Navigate to root (/) for new sessions or /session/:id for existing
+      if (navigationTarget === "/") {
+        navigate("/", { replace: true });
+      } else if (navigationTarget !== sessionId) {
+        // Use replace: true for pending session transitions (smooth URL change without history)
+        navigate(`/session/${navigationTarget}`, {
+          replace: isPendingReplacement || navigationTarget.startsWith("pending-"),
+        });
+      }
+
+      // Close mobile sidebar when session is selected
+      if (isMobile) {
+        setSidebarOpen(false);
+      }
+
+      // Clear navigation target to prevent re-triggering
+      useSessionStore.setState({ navigationTarget: null });
+    }
+  }, [navigationTarget, sessionId, navigate, isMobile]);
+
+  // Temporary project info (until we have proper project management)
+  const selectedProject = selectedSession
+    ? { name: "Current Project", path: ".", fullPath: "." }
+    : null;
+
+  return (
+    <div className="h-screen flex overflow-hidden">
+      {/* Desktop Sidebar - Fixed on left */}
+      {!isMobile && (
+        <aside className="w-64 border-r border-border flex-shrink-0 overflow-y-auto bg-background">
+          <Sidebar isMobile={false} isPWA={false} />
+        </aside>
+      )}
+
+      {/* Mobile Sidebar - Overlay */}
+      {isMobile && (
+        <div
+          className={`fixed inset-0 z-50 flex transition-all duration-150 ease-out ${
+            sidebarOpen ? "opacity-100 visible" : "opacity-0 invisible"
+          }`}
+        >
+          <button
+            className="fixed inset-0 bg-background/80 backdrop-blur-sm transition-opacity duration-150 ease-out"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar"
+          />
+          <div
+            className={`relative w-[85vw] max-w-sm sm:w-80 bg-card border-r border-border transform transition-transform duration-150 ease-out ${
+              sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
+            style={{ height: "calc(100vh - 80px)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Sidebar isMobile={true} isPWA={false} />
+          </div>
+        </div>
+      )}
+
+      {/* Right Content Area - Full Height */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Header Navigation - Top of Right Side */}
+        <HeaderNav
+          selectedProject={selectedProject}
+          selectedSession={selectedSession}
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          isMobile={isMobile}
+          onMenuClick={isMobile ? () => setSidebarOpen(true) : undefined}
+        />
+
+        {/* Main Content - Below Header */}
+        <main className="flex-1 overflow-hidden bg-background">
+          {/* Chat Tab */}
+          <div className={activeTab === "chat" ? "h-full" : "hidden"}>
+            <ChatInterface />
+          </div>
+
+          {/* Shell Tab - Placeholder */}
+          {activeTab === "shell" && (
+            <div className="h-full flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+              <div className="text-center">
+                <div className="w-16 h-16 mx-auto mb-4 bg-gray-200 dark:bg-gray-800 rounded-full flex items-center justify-center">
+                  <svg
+                    className="w-8 h-8 text-gray-400"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"
+                    />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                  Shell View
+                </h3>
+                <p className="text-gray-600 dark:text-gray-400">Coming soon...</p>
+              </div>
+            </div>
+          )}
+
+          {/* Files Tab - Placeholder */}
+          {activeTab === "files" && (
+            <div className="h-full flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+              <div className="text-center">
+                <div className="w-16 h-16 mx-auto mb-4 bg-gray-200 dark:bg-gray-800 rounded-full flex items-center justify-center">
+                  <svg
+                    className="w-8 h-8 text-gray-400"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"
+                    />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                  File Browser
+                </h3>
+                <p className="text-gray-600 dark:text-gray-400">Coming soon...</p>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<AppContent />} />
+        <Route path="/session/:sessionId" element={<AppContent />} />
+        <Route path="/auto" element={<AppContent />} />
+      </Routes>
+    </Router>
+  );
+}

@@ -1,5 +1,33 @@
 # @deepractice-ai/agent-sdk
 
+## 0.8.0
+
+## 0.7.0
+
+### Patch Changes
+
+- dabb970: Fix session abort to allow resuming conversation after stopping
+  - Change abort() to set session state to 'idle' instead of 'aborted'
+  - Remove messageSubject.complete() call in abort() to keep message stream open
+  - Session can now continue receiving messages after user clicks Stop button
+
+## 0.6.4
+
+### Patch Changes
+
+- a240812: Fix changeset fixed groups configuration
+
+  Replace wildcard pattern with explicit package names as changeset doesn't support glob patterns in fixed groups.
+
+## 0.6.1
+
+### Patch Changes
+
+- dce9d18: Sync package versions and fix documentation
+  - Fix incorrect package name in README installation instructions
+  - Sync agent-sdk version to match agent package (0.6.0)
+  - Ensure version consistency across fixed package groups
+
 ## 0.4.1
 
 ### Patch Changes
